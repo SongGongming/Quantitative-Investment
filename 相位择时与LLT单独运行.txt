@@ -1,0 +1,351 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu May 10 14:09:36 2018
+
+@author: Jackie
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+import math
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+
+# 读取股票价格数据
+SH000300 = pd.read_csv("D:/python/SH000300.csv")
+SH000300.index = pd.to_datetime(SH000300.tradeDate)
+CloseData = SH000300.closeIndex
+#CloseData = SH000300.closePrice
+CloseData = CloseData.dropna()
+
+# 划分短期趋势和长期趋势参数
+Alpha = 0.06
+LLTAlpha = 0.04
+
+# 二阶低通滤波器
+LPFPrice = np.zeros(len(CloseData))
+for i in range(0, len(CloseData)):
+    if i <= 2:
+        LPFPrice[i] = CloseData[i]
+    else:
+        LPFPrice[i] = (LLTAlpha-LLTAlpha**2/4)*CloseData[i] +  (LLTAlpha**2/2)*CloseData[i-1]\
+        -(LLTAlpha-3*LLTAlpha**2/4)*CloseData[i-2] + 2*(1-LLTAlpha)*LPFPrice[i-1]\
+         - (1-LLTAlpha)**2*LPFPrice[i-2]
+         
+#对过滤后的数据进行差分
+FDprice = pd.Series(LPFPrice,index=CloseData.index).diff()
+
+# 希尔伯特变换离散化参数
+M = 29
+
+EMCloseData = CloseData.rolling(window=5,center=False).mean()
+for i in range(0,4):
+    EMCloseData[i] = CloseData[i]
+
+# 二阶高通滤波器
+HPFPrice = np.zeros(len(CloseData))
+for i in range(0, len(CloseData)):
+    if i <= 2:
+        HPFPrice[i] = 0
+    else:
+        HPFPrice[i] = (1-Alpha/2)**2*(EMCloseData[i]-2*EMCloseData[i-1]\
+                +EMCloseData[i-2])+2*(1-Alpha)*HPFPrice[i-1]-(1-Alpha)**2\
+                *HPFPrice[i-2]
+
+# 希尔伯特变换
+Xn = HPFPrice
+# 相位空间的X轴
+In = np.zeros(len(HPFPrice) + M)
+HilbertPrice = np.zeros(len(HPFPrice))
+
+# M个点的延迟
+for i in range(M, len(HPFPrice) + M):
+    In[i] = Xn[i - M]
+
+for i in range(M, len(HPFPrice)):
+    for r in range(1, 2 * M + 1):
+        if r == M + 1:
+            Ur = 0
+        else:
+            Ur = (1 - (-1)**(r - M - 1)) / (np.pi * (r - M - 1))
+        HilbertPrice[i] = HilbertPrice[i] + Ur * In[i - M - 1 + r]
+
+# 根据希尔伯特信号划分趋势，三四象限(纵坐标小于0)为上升，一二象限为下降
+Ptrend = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+for i in range(len(HilbertPrice)):
+    if HilbertPrice[i]<0:
+        Ptrend[i] = 1
+    elif HilbertPrice[i]>0:
+        Ptrend[i] = -1
+           
+# 根据LLT信号划分趋势，正为上升，负为下降
+LLTtrend = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+for i in range(len(HilbertPrice)):
+    if FDprice[i]>0:
+        LLTtrend[i] = 1
+    elif FDprice[i]<0:
+        LLTtrend[i] = -1
+
+#绘图
+LPFPriceSeries = pd.Series(LPFPrice, index=CloseData.index)
+plt.figure(1)
+plt.plot(CloseData, label="上证指数", color='k')
+plt.plot(LPFPriceSeries,label="LLT",\
+         color='g',linestyle='-.')
+plt.title("沪深300指数LLT结果")
+plt.legend()
+
+plt.figure(2)
+plt.plot(CloseData, label="上证指数", color='k')
+plt.plot(EMCloseData,label="EMA消噪结果",\
+         color='g',linestyle='-.')
+plt.title("沪深300指数消噪结果")
+plt.legend()
+
+HPFPrice = pd.Series(HPFPrice, index=CloseData.index)
+fig = plt.figure(3)
+ax1 = fig.add_subplot(111)
+ax1.plot(CloseData, label="基准", color='dodgerblue', linewidth=0.8)
+ax1.set_ylabel('基准')
+ax2 = ax1.twinx()
+ax2.plot(HPFPrice, label="消噪后二阶滤波", color='orangered', linewidth=0.8)
+ax2.set_ylabel('消噪后二阶滤波')
+plt.title("基准二阶滤波")
+plt.ylim(-1200, 600)
+plt.legend()
+
+fig = plt.figure(4)
+plt.plot(HilbertPrice, color='dodgerblue', linewidth=0.8)
+plt.title("希尔伯特变换时序图")
+
+
+fig = plt.figure(5)
+plt.plot(In[:-M],HilbertPrice,linewidth=0.8)
+plt.scatter(In[:-M],HilbertPrice,c='orangered',s=15,alpha=0.9,marker='o')
+plt.title("相位图")
+
+def BackTest(CloseData, Ptrend, LLTtrend):  
+    Pcash = 500000
+    Pnum = 0
+    Pshare = 0
+    LLTcash = 500000
+    LLTnum = 0
+    LLTshare = 0
+    #记录交易次数
+    deal = 0
+    #标记相位择时当前状态为做多还是空仓
+    Pposition1 = 0
+    #标记相位择时当前状态为做空还是空仓
+    Pposition2 = 0
+    #标记LLT当前状态为做多还是空仓
+    LLTposition1 = 0
+    #标记LLT当前状态为做空还是空仓
+    LLTposition2 = 0
+    account = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+    #买入手续费率
+    BuyFeeRate = 0.0004 
+    #卖出手续费率以及印花税                      
+    SellFeeRate = 0.0014
+    #分别记录正确与错误的次数，用于计算胜率
+    up = 0
+    down = 0
+    #记录相位择时所有买入交易的时间以及价格
+    buy = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+    #记录相位择时所有卖出交易的时间以及价格
+    sell = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+    #记录LLT所有买入交易的时间以及价格
+    LLTbuy = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+    #记录LLT所有卖出交易的时间以及价格
+    LLTsell = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+    #单次交易的收益率序列
+    singleRet = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+    PsingleRet = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+    LLTsingleRet = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+    #记录回撤
+    DD = pd.Series(np.zeros(len(CloseData)),index=CloseData.index)
+    for i in range(len(CloseData)):
+        #如果相位择时当前空仓并且信号看多，买入
+        if (Pposition1==0) and (Ptrend[i]==1):
+            buy[i] = CloseData[i]
+            buyprice = CloseData[i]*(1+BuyFeeRate)
+            #记录当前资金可买入的股票数量
+            Pnum = int(Pcash/buyprice)
+            #记录当前股票市值
+            Pshare = Pnum*CloseData[i]
+            #记录剩余现金量
+            Pcash = Pcash%buyprice
+            #状态标记为看多持仓
+            Pposition1 = 1
+            deal = deal+1
+        
+        #设置止损
+        if (Pposition1==1) and(buyprice-CloseData[i])/buyprice>=0.07:
+            sell[i] = CloseData[i]
+            sellprice = CloseData[i]*(1-SellFeeRate)
+            #记录本次交易的收益率
+            PsingleRet[i] = PsingleRet[i]+(sellprice-buyprice)/buyprice
+            Pcash = Pcash+Pnum*sellprice
+            Pnum = 0
+            Pshare = 0
+            Pposition1 = 0
+            deal = deal+1
+            
+        #如果当前持仓并且信号看空，卖出股票平仓
+        elif (Pposition1==1) and (Ptrend[i]==-1):
+            sell[i] = CloseData[i]
+            sellprice = CloseData[i]*(1-SellFeeRate)
+            #记录本次交易的收益率
+            PsingleRet[i] = PsingleRet[i]+(sellprice-buyprice)/buyprice
+            Pcash = Pcash+Pnum*sellprice
+            Pnum = 0
+            Pshare = 0
+            Pposition1 = 0
+            deal = deal+1
+            
+        #如果相位择时当前空仓并且信号看空，卖出(卖空)
+        if (Pposition2==0) and (Ptrend[i]==-1):
+            sellprice2 = CloseData[i]*(1-SellFeeRate)
+            Pnum = int(Pcash/sellprice2)
+            Pposition2 = 1
+            deal = deal+1
+            
+        #设置止损
+        if (Pposition2==1) and (CloseData[i]-sellprice2)/sellprice2>=0.07:
+            buyprice2 = CloseData[i]*(1+BuyFeeRate)
+            Pcash = Pcash+(sellprice2-buyprice2)*Pnum
+            #记录本次交易的收益率
+            PsingleRet[i] = PsingleRet[i]+(sellprice2-buyprice2)/buyprice2
+            Pposition2 = 0
+            deal = deal+1
+            
+        #如果相位择时当前做空并且信号看多，买入股票平仓
+        elif (Pposition2==1) and (Ptrend[i]==1):
+            buyprice2 = CloseData[i]*(1+BuyFeeRate)
+            Pcash = Pcash+(sellprice2-buyprice2)*Pnum
+            #记录本次交易的收益率
+            PsingleRet[i] = PsingleRet[i]+(sellprice2-buyprice2)/buyprice2
+            Pposition2 = 0
+            deal = deal+1
+            
+        #如果LLT当前空仓并且信号看多，买入
+        if (LLTposition1==0) and (LLTtrend[i]==1):
+            LLTbuy[i] = CloseData[i]
+            LLTbuyprice = CloseData[i]*(1+BuyFeeRate)
+            #记录当前资金可买入的股票数量
+            LLTnum = int(LLTcash/LLTbuyprice)
+            #记录当前股票市值
+            LLTshare = LLTnum*CloseData[i]
+            #记录剩余现金量
+            LLTcash = LLTcash%LLTbuyprice
+            #状态标记为看多持仓
+            LLTposition1 = 1
+            deal = deal+1
+            
+         #设置止损
+        if (LLTposition1==1) and (LLTbuyprice-CloseData[i])/LLTbuyprice>=0.07:
+            LLTsell[i] = CloseData[i]
+            LLTsellprice = CloseData[i]*(1-SellFeeRate)
+            #记录本次交易的收益率
+            LLTsingleRet[i] = LLTsingleRet[i]+(LLTsellprice-LLTbuyprice)/LLTbuyprice
+            LLTcash = LLTcash+LLTnum*LLTsellprice
+            LLTnum = 0
+            LLTshare = 0
+            LLTposition1 = 0
+            deal = deal+1
+            
+        #如果LLT持仓，且信号看空，卖出平仓   
+        elif (LLTposition1==1) and (LLTtrend[i]==-1):
+            LLTsell[i] = CloseData[i]
+            LLTsellprice = CloseData[i]*(1-SellFeeRate)
+            #记录本次交易的收益率
+            LLTsingleRet[i] = LLTsingleRet[i]+(LLTsellprice-LLTbuyprice)/LLTbuyprice
+            LLTcash = LLTcash+LLTnum*LLTsellprice
+            LLTnum = 0
+            LLTshare = 0
+            LLTposition1 = 0
+            deal = deal+1
+            
+        #如果LLT当前空仓并且信号看空，卖出(卖空)
+        if (LLTposition2==0) and (LLTtrend[i]==-1):
+            LLTsellprice2 = CloseData[i]*(1-SellFeeRate)
+            LLTnum = int(LLTcash/LLTsellprice2)
+            LLTposition2 = 1
+            deal = deal+1
+            
+        #设置止损
+        if (LLTposition2==1) and (CloseData[i]-LLTsellprice2)/LLTsellprice2>=0.07:
+            LLTbuyprice2 = CloseData[i]*(1+BuyFeeRate)
+            Pcash = Pcash+(LLTsellprice2-LLTbuyprice2)*LLTnum
+            #记录本次交易的收益率
+            LLTsingleRet[i] = LLTsingleRet[i]+(LLTsellprice2-LLTbuyprice2)/LLTbuyprice2
+            LLTposition2 = 0
+            deal = deal+1
+            
+        #如果LLT当前做空并且信号看多，买入股票平仓
+        elif (LLTposition2==1) and (LLTtrend[i]==1):
+            LLTbuyprice2 = CloseData[i]*(1+BuyFeeRate)
+            Pcash = Pcash+(LLTsellprice2-LLTbuyprice2)*LLTnum
+            #记录本次交易的收益率
+            LLTsingleRet[i] = LLTsingleRet[i]+(LLTsellprice2-LLTbuyprice2)/LLTbuyprice2
+            LLTposition2 = 0
+            deal = deal+1
+            
+        singleRet[i] = 0.5*PsingleRet[i]+0.5*LLTsingleRet[i]
+        account[i] = LLTshare+Pshare+LLTcash+Pcash
+        DD[i] = (account.max()-account[i])/account.max()
+      
+    for i in range(len(singleRet)):
+        if singleRet[i]>0:
+            up = up+1
+        elif singleRet[i]<0:
+            down = down+1    
+        
+    fig = plt.figure(6)
+    plt.plot(np.array(CloseData))
+    plt.scatter(np.arange(len(buy)),buy,c='r',s=45)
+    plt.scatter(np.arange(len(buy)),sell,c='g',s=45)
+    plt.scatter(np.arange(len(buy)),LLTbuy,c='yellow')
+    plt.scatter(np.arange(len(buy)),LLTsell,c='purple')
+    plt.title("指示示意图") 
+    
+    cumRet = (singleRet+1).cumprod()
+    HSsingleRet = (CloseData-CloseData.shift(1))/CloseData.shift(1)
+    HSsingleRet = HSsingleRet.dropna()
+    HScumRet = (HSsingleRet+1).cumprod()
+    
+    accuracyRate = up/(up+down)
+    
+    fig = plt.figure(7)
+    plt.plot(singleRet, color='dodgerblue')
+    plt.title("单次交易收益率")
+    
+    fig = plt.figure(8)
+    plt.plot(HScumRet, color='dodgerblue')
+    plt.plot(cumRet, color='orangered')
+    plt.title("策略收益率")
+    
+    fig = plt.figure(9)
+    plt.plot(account, color='dodgerblue')
+    plt.title("账户资金变动")
+    
+    print("策略统计样本量为：{}".format(len(CloseData)))
+    print("策略预测次数为：{}".format(deal))
+    print("策略平均预测周期为：{}".format(round(len(CloseData)/(deal))))
+    print("策略胜率为：{}".format(format(accuracyRate, '.0%')))
+    ret = cumRet[-1]-1
+    print("相位择时策略累计收益率为：{}".format(format(ret, '.0%')))
+    Rf = 0.04
+    Rp = (cumRet[-1])**(252/(len(CloseData)-1))-1
+    print("策略年化收益率为：{}".format(format(Rp, '.0%'))) 
+    MDD = DD.max()
+    print("策略最大回撤为：{}".format(format(MDD, '.0%')))
+    sigema = math.sqrt(252) * singleRet.std()
+    sharpe_rat = (Rp-Rf)/sigema
+    print("策略夏普比率为：{}".format(format(sharpe_rat, '.0%')))   
+            
+BackTest(CloseData, Ptrend, LLTtrend)
+
+
+
