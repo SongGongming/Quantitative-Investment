@@ -1,0 +1,69 @@
+import numpy as np
+import pandas as pd
+
+# import tushare as ts  # 导入tushare财经数据接口
+# code = list(ts.get_stock_basics().index)
+# allclose = ts.get_hist_data('sh').close
+# allclose.name = 'sh'
+# n=0
+# for i in code:  # 循环遍历沪深股票，获取股价
+#     print("正在获取第{}支股票数据".format(n))
+#     n += 1
+#     df = ts.get_hist_data(i)
+#     if df is None:
+#         continue
+#     else:
+#         df = df[::-1]  # 将时间序列反转，变为由远及近
+#         close = df.close
+#         close.name=i
+#         allclose = pd.merge(pd.DataFrame(allclose),pd.DataFrame(close),left_index=True,right_index=True,how='left')
+# allclose.to_csv("U:/allclose.csv")
+
+allclose = pd.read_csv("U:/allclose.csv")
+allclose.index = pd.to_datetime(allclose.date)
+allclose.pop('date')  # 无用的列弹出
+allclose.pop('sh')
+
+# 将2015年尚未上市的股票清洗掉
+popList = list()
+for i in range(len(allclose.columns) - 1):
+    data = allclose.iloc[0:10, i]
+    data = data.dropna()
+    if len(data) == 0:
+        popList.append(allclose.columns[i])
+for i in popList:
+    allclose.pop(i)
+
+minSSD = 100
+PairX = ''
+PairY = ''
+spreadList = list()
+for i in range(len(allclose.columns) - 1):
+    for j in range(len(allclose.columns) - 1):
+        print("第{}支股票，第{}个数据".format(i, j))
+        if i == j:
+            continue
+        else:
+            fromer = allclose.iloc[:, i]
+            laster = allclose.iloc[:, j]
+            fromer.name = allclose.columns[i]
+            laster.name = allclose.columns[j]
+            data = pd.concat([fromer, laster], axis=1)
+            data = data.dropna()
+            if len(data) == 0:
+                continue
+            else:
+                priceX = data.iloc[:, 0]
+                priceY = data.iloc[:, 1]
+                returnX = (priceX - priceX.shift(1)) / priceX.shift(1)[1:]
+                returnY = (priceY - priceY.shift(1)) / priceY.shift(1)[1:]
+                standardX = (returnX + 1).cumprod()
+                standardY = (returnY + 1).cumprod()
+                SSD = np.sum((standardY - standardX) ** 2) / len(data)
+                if SSD < minSSD:
+                    minSSD = SSD
+                    PairX = allclose.columns[i]
+                    PairY = allclose.columns[j]
+
+print("标准化价差最小的两支股票为{},{}".format(PairX, PairY))
+print("最小距离为{}".format(minSSD))
